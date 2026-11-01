@@ -1,6 +1,6 @@
 # yNotes
 
-**Note once run anywhere.**
+**Note once read anywhere.**
 
 Encrypted notes to yourself, stored on the Algorand blockchain.
 
