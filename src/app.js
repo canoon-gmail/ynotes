@@ -267,15 +267,8 @@ function closeScan() {
   $('scanModal').hidden = true;
 }
 
-// Seed QR: when served over http(s) it's a link (phone camera opens app directly);
-// the seed lives in the #fragment, which browsers never send to the server.
-function seedQRText(m) {
-  return location.protocol.startsWith('http') ? `${location.origin}${location.pathname}#m=${m.replace(/ /g, '-')}` : m;
-}
+// The key QR holds just the 25 words (never a link, so it can't end up in browser/scanner history).
 function extractMnemonic(s) {
-  s = s.trim();
-  const i = s.indexOf('#m=');
-  if (i >= 0) s = decodeURIComponent(s.slice(i + 3));
   return s.toLowerCase().replace(/[-,\s]+/g, ' ').trim();
 }
 
@@ -390,7 +383,7 @@ async function init() {
   $('createBtn').onclick = async () => {
     const { sk } = algosdk.generateAccount();
     const m = algosdk.secretKeyToMnemonic(sk);
-    if (await setupWallet(m)) showQR(seedQRText(m), 'Your secret key QR', 'Save/print this QR now. Anyone with it can read your notes and spend your coins.');
+    if (await setupWallet(m)) showQR(m, 'Your secret key QR', 'Save/print this QR now. Anyone with it can read your notes and spend your coins.');
   };
   $('importBtn').onclick = () => setupWallet($('importText').value).then((ok) => ok && ($('importText').value = ''));
   $('scanImportBtn').onclick = () => scanQR(setupWallet);
@@ -411,7 +404,7 @@ async function init() {
   $('backupBtn').onclick = async () => {
     const pin = await askPin({ title: 'Enter PIN to show your key QR', check: openVault });
     if (pin === null) return;
-    showQR(seedQRText(state.mnemonic), 'Your secret key QR', 'Scan this on another device to open your notes. Keep it private!');
+    showQR(state.mnemonic, 'Your secret key QR', 'Scan this on another device to open your notes. Keep it private!');
   };
   $('changePinBtn').onclick = async () => {
     if (await askPin({ title: 'Current PIN', check: openVault }) === null) return;
@@ -426,19 +419,6 @@ async function init() {
   $('qrShowText').onclick = () => ($('qrText').hidden = !$('qrText').hidden);
   $('scanClose').onclick = closeScan;
 
-  // Login from a scanned seed link (#m=...), then wipe it from the address bar/history.
-  if (location.hash.startsWith('#m=')) {
-    const m = extractMnemonic(location.hash);
-    history.replaceState(null, '', location.pathname + location.search);
-    const saved = localStorage.getItem(VAULT);
-    if (saved) {
-      let same = false;
-      try { same = JSON.parse(saved).addr === algosdk.mnemonicToSecretKey(m).addr.toString(); } catch { /* invalid */ }
-      if (same) return login(m); // holding the key is proof enough
-      if (!confirm('Replace the wallet saved on this device with the scanned one?')) return showLock();
-    }
-    return setupWallet(m);
-  }
   if (localStorage.getItem(VAULT)) return showLock();
   const legacy = localStorage.getItem('yn_m'); // saved by an older version without PIN
   if (legacy) {
