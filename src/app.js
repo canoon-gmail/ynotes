@@ -279,47 +279,124 @@ function extractMnemonic(s) {
   return s.toLowerCase().replace(/[-,\s]+/g, ' ').trim();
 }
 
+// ---------- PIN vault: the 25 words are stored encrypted with a PIN-derived key ----------
+const VAULT = 'yn_v';
+const PBKDF2_ITER = 600000;
+async function pinKey(pin, salt) {
+  const base = await crypto.subtle.importKey('raw', enc.encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: PBKDF2_ITER, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function saveVault(mnemonic, pin) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await pinKey(pin, salt), enc.encode(mnemonic)));
+  const addr = algosdk.mnemonicToSecretKey(mnemonic).addr.toString(); // public, lets us match a scanned QR without the PIN
+  localStorage.setItem(VAULT, JSON.stringify({ v: 1, addr, salt: b64(salt), iv: b64(iv), ct: b64(ct) }));
+  localStorage.removeItem('yn_m'); // drop any old unencrypted copy
+}
+async function openVault(pin) { // throws on wrong PIN
+  const v = JSON.parse(localStorage.getItem(VAULT));
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(v.iv) }, await pinKey(pin, unb64(v.salt)), unb64(v.ct));
+  return dec.decode(pt);
+}
+
+// PIN dialog. Resolves to the PIN, or null if cancelled. `check` may throw to reject the PIN.
+function askPin({ title, confirmPin = false, check }) {
+  return new Promise((resolve) => {
+    const [p1, p2, msg] = [$('pinInput'), $('pinInput2'), $('pinMsg')];
+    $('pinTitle').textContent = title;
+    p1.value = p2.value = msg.textContent = '';
+    p2.hidden = !confirmPin;
+    $('pinModal').hidden = false;
+    p1.focus();
+    const done = (val) => { $('pinModal').hidden = true; $('pinOk').onclick = $('pinCancel').onclick = p1.onkeydown = p2.onkeydown = null; resolve(val); };
+    const ok = async () => {
+      const pin = p1.value;
+      if (confirmPin && pin.length < 4) return (msg.textContent = 'Use at least 4 characters (6+ is safer).');
+      if (confirmPin && pin !== p2.value) return (msg.textContent = 'PINs do not match.');
+      if (check) {
+        $('pinOk').disabled = true;
+        msg.textContent = 'Checking…';
+        try { await check(pin); } catch { msg.textContent = 'Wrong PIN.'; p1.value = ''; p1.focus(); return; }
+        finally { $('pinOk').disabled = false; }
+      }
+      done(pin);
+    };
+    $('pinOk').onclick = ok;
+    $('pinCancel').onclick = () => done(null);
+    p1.onkeydown = p2.onkeydown = (e) => { if (e.key === 'Enter') ok(); };
+  });
+}
+
 // ---------- account ----------
 async function login(mnemonic) {
   const acct = algosdk.mnemonicToSecretKey(mnemonic); // throws if invalid
   state.acct = acct;
+  state.mnemonic = mnemonic;
   state.key = await deriveKey(acct.sk);
   state.notes = []; state.pending = []; state.read = new Set();
-  localStorage.setItem('yn_m', mnemonic);
-  $('setup').hidden = true;
+  $('setup').hidden = $('lock').hidden = true;
   $('main').hidden = false;
   $('address').textContent = addr();
   $('explorer').href = `${net().explorer}/account/${addr()}`;
   refreshBalance();
   refreshNotes();
 }
-function tryLogin(raw) {
-  login(extractMnemonic(raw)).catch((e) => toast('Invalid 25-word phrase: ' + e.message, true));
+
+// New wallet on this device (create / paste / scan): validate, set a PIN, store encrypted.
+async function setupWallet(raw) {
+  const m = extractMnemonic(raw);
+  try { algosdk.mnemonicToSecretKey(m); } catch (e) { toast('Invalid 25-word phrase: ' + e.message, true); return false; }
+  const pin = await askPin({ title: 'Set a PIN for this device', confirmPin: true });
+  if (pin === null) return false;
+  await saveVault(m, pin);
+  await login(m);
+  return true;
 }
+
+async function unlock() {
+  const btn = $('unlockBtn');
+  busy(btn, true, 'Unlocking…');
+  try {
+    await login(await openVault($('unlockPin').value));
+    $('unlockPin').value = '';
+  } catch {
+    toast('Wrong PIN', true);
+    $('unlockPin').select();
+  } finally {
+    busy(btn, false);
+  }
+}
+
 function logout() {
   if (!confirm('Forget wallet on THIS device? (Notes stay on-chain. You need your QR / 25 words to log in again.)')) return;
+  localStorage.removeItem(VAULT);
   localStorage.removeItem('yn_m');
   location.reload();
 }
 
 // ---------- wire up ----------
-function init() {
+async function init() {
   $('netSel').value = state.net;
   $('netSel').onchange = () => {
     state.net = $('netSel').value;
     localStorage.setItem('yn_net', state.net);
     document.body.dataset.net = state.net;
-    if (state.acct) login(localStorage.getItem('yn_m'));
+    if (state.acct) login(state.mnemonic);
   };
   document.body.dataset.net = state.net;
 
-  $('createBtn').onclick = () => {
+  $('createBtn').onclick = async () => {
     const { sk } = algosdk.generateAccount();
     const m = algosdk.secretKeyToMnemonic(sk);
-    login(m).then(() => showQR(seedQRText(m), 'Your secret key QR', 'Save/print this QR now. Anyone with it can read your notes and spend your coins.'));
+    if (await setupWallet(m)) showQR(seedQRText(m), 'Your secret key QR', 'Save/print this QR now. Anyone with it can read your notes and spend your coins.');
   };
-  $('importBtn').onclick = () => tryLogin($('importText').value);
-  $('scanImportBtn').onclick = () => scanQR(tryLogin);
+  $('importBtn').onclick = () => setupWallet($('importText').value).then((ok) => ok && ($('importText').value = ''));
+  $('scanImportBtn').onclick = () => scanQR(setupWallet);
+  $('unlockBtn').onclick = unlock;
+  $('unlockPin').onkeydown = (e) => { if (e.key === 'Enter') unlock(); };
+  $('forgetBtn').onclick = logout;
 
   $('saveNote').onclick = saveNote;
   $('noteText').oninput = updateCounter;
@@ -331,11 +408,19 @@ function init() {
   $('scanAddrBtn').onclick = () => scanQR((s) => ($('sendTo').value = s.replace(/^algorand:\/\//i, '').split('?')[0]));
   $('receiveBtn').onclick = () => showQR(addr(), 'Receive ALGO', 'Share this address to receive coins.');
   $('copyAddr').onclick = () => navigator.clipboard.writeText(addr()).then(() => toast('Address copied'));
-  $('backupBtn').onclick = () => {
-    if (!confirm('Show your SECRET key QR? Make sure nobody is watching your screen.')) return;
-    const m = localStorage.getItem('yn_m');
-    showQR(seedQRText(m), 'Your secret key QR', 'Scan this on another device to open your notes. Keep it private!');
+  $('backupBtn').onclick = async () => {
+    const pin = await askPin({ title: 'Enter PIN to show your key QR', check: openVault });
+    if (pin === null) return;
+    showQR(seedQRText(state.mnemonic), 'Your secret key QR', 'Scan this on another device to open your notes. Keep it private!');
   };
+  $('changePinBtn').onclick = async () => {
+    if (await askPin({ title: 'Current PIN', check: openVault }) === null) return;
+    const pin = await askPin({ title: 'New PIN', confirmPin: true });
+    if (pin === null) return;
+    await saveVault(state.mnemonic, pin);
+    toast('PIN changed');
+  };
+  $('lockBtn').onclick = () => location.reload();
   $('logoutBtn').onclick = logout;
   $('qrClose').onclick = () => { $('qrModal').hidden = true; $('qrText').hidden = true; };
   $('qrShowText').onclick = () => ($('qrText').hidden = !$('qrText').hidden);
@@ -345,9 +430,26 @@ function init() {
   if (location.hash.startsWith('#m=')) {
     const m = extractMnemonic(location.hash);
     history.replaceState(null, '', location.pathname + location.search);
-    return tryLogin(m);
+    const saved = localStorage.getItem(VAULT);
+    if (saved) {
+      let same = false;
+      try { same = JSON.parse(saved).addr === algosdk.mnemonicToSecretKey(m).addr.toString(); } catch { /* invalid */ }
+      if (same) return login(m); // holding the key is proof enough
+      if (!confirm('Replace the wallet saved on this device with the scanned one?')) return showLock();
+    }
+    return setupWallet(m);
   }
-  const saved = localStorage.getItem('yn_m');
-  if (saved) tryLogin(saved);
+  if (localStorage.getItem(VAULT)) return showLock();
+  const legacy = localStorage.getItem('yn_m'); // saved by an older version without PIN
+  if (legacy) {
+    await login(legacy);
+    const pin = await askPin({ title: 'Set a PIN to protect your saved key', confirmPin: true });
+    if (pin !== null) { await saveVault(legacy, pin); toast('Key is now PIN-protected'); }
+  }
+}
+function showLock() {
+  $('setup').hidden = true;
+  $('lock').hidden = false;
+  $('unlockPin').focus();
 }
 init();

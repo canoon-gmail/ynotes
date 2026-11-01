@@ -70,6 +70,16 @@
     </div>
   </section>
 
+  <!-- Lock -->
+  <section id="lock" hidden>
+    <div class="card">
+      <h2>🔒 Locked</h2>
+      <input id="unlockPin" type="password" autocomplete="current-password" placeholder="PIN">
+      <div class="row"><button id="unlockBtn">Unlock</button></div>
+      <p class="mute">Forgot your PIN? <a href="#" id="forgetBtn" style="color:var(--acc)">Forget wallet here</a>, then scan your key QR again.</p>
+    </div>
+  </section>
+
   <!-- Main -->
   <section id="main" hidden>
     <div class="card">
@@ -113,10 +123,12 @@
     <div class="card">
       <h2>This device</h2>
       <div class="row">
+        <button id="lockBtn" class="ghost">🔒 Lock</button>
         <button id="backupBtn" class="ghost">🔑 Show my key QR</button>
+        <button id="changePinBtn" class="ghost">Change PIN</button>
         <button id="logoutBtn" class="danger">Forget wallet here</button>
       </div>
-      <p class="mute">Each note or mark-read costs 0.001 ALGO in network fees. Notes are encrypted with your key before they go on-chain. The chain keeps them forever.</p>
+      <p class="mute">Your key is stored on this device encrypted with your PIN. Each note or mark-read costs 0.001 ALGO in network fees. Notes are encrypted with your key before they go on-chain. The chain keeps them forever.</p>
     </div>
   </section>
 </div>
@@ -139,6 +151,19 @@
     <h3 style="margin-top:0">Scan QR</h3>
     <video id="scanVideo" playsinline muted></video>
     <div class="row" style="justify-content:center"><button id="scanClose" class="small">Cancel</button></div>
+  </div>
+</div>
+
+<div id="pinModal" class="modal" hidden>
+  <div class="box">
+    <h3 id="pinTitle" style="margin-top:0"></h3>
+    <input id="pinInput" type="password" autocomplete="off" placeholder="PIN">
+    <input id="pinInput2" type="password" autocomplete="off" placeholder="Repeat PIN" style="margin-top:8px">
+    <p id="pinMsg" class="warn"></p>
+    <div class="row" style="justify-content:center">
+      <button id="pinCancel" class="small ghost">Cancel</button>
+      <button id="pinOk" class="small">OK</button>
+    </div>
   </div>
 </div>
 
