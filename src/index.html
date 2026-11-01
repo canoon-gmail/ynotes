@@ -110,9 +110,9 @@
       <h2>Wallet</h2>
       <div id="balance">…</div>
       <div id="fundHint" class="warn" hidden>Need test coins? Get free testnet ALGO at <a href="https://lora.algokit.io/testnet/fund" target="_blank" style="color:var(--acc)">lora.algokit.io/testnet/fund</a> (paste your address).</div>
-      <div class="mono" id="address" style="margin-top:6px"></div>
+      <canvas id="addrQR" title="Tap to enlarge" style="display:block;margin:8px 0;border-radius:8px;cursor:pointer"></canvas>
+      <div class="mono" id="address"></div>
       <div class="row">
-        <button id="receiveBtn" class="small ghost">Receive QR</button>
         <button id="copyAddr" class="small ghost">Copy address</button>
         <a id="explorer" target="_blank" class="mute">explorer ↗</a>
       </div>

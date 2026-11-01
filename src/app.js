@@ -332,6 +332,7 @@ async function login(mnemonic) {
   $('setup').hidden = $('lock').hidden = true;
   $('main').hidden = false;
   $('address').textContent = addr();
+  QRCode.toCanvas($('addrQR'), addr(), { width: 160, margin: 2 });
   $('explorer').href = `${net().explorer}/account/${addr()}`;
   refreshBalance();
   refreshNotes();
@@ -399,7 +400,7 @@ async function init() {
 
   $('sendBtn').onclick = sendCoins;
   $('scanAddrBtn').onclick = () => scanQR((s) => ($('sendTo').value = s.replace(/^algorand:\/\//i, '').split('?')[0]));
-  $('receiveBtn').onclick = () => showQR(addr(), 'Receive ALGO', 'Share this address to receive coins.');
+  $('addrQR').onclick = () => showQR(addr(), 'Receive ALGO', 'Share this address to receive coins.');
   $('copyAddr').onclick = () => navigator.clipboard.writeText(addr()).then(() => toast('Address copied'));
   $('backupBtn').onclick = async () => {
     const pin = await askPin({ title: 'Enter PIN to show your key QR', check: openVault });
