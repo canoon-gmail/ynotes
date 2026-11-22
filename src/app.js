@@ -227,6 +227,23 @@ function loadPhoto(p) {
   return photoUrls.get(p.id);
 }
 
+// Phones: share sheet ("Save Image" / "Save to Photos"). Elsewhere: plain download.
+async function savePhoto(n) {
+  try {
+    const blob = await (await fetch(await loadPhoto(n.photo))).blob();
+    const name = `ynotes-${new Date(n.time).toISOString().slice(0, 19).replace(/[T:]/g, '-')}.jpg`;
+    const file = new File([blob], name, { type: 'image/jpeg' });
+    if (navigator.canShare?.({ files: [file] })) return await navigator.share({ files: [file] });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(file);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('Could not save photo: ' + e.message, true);
+  }
+}
+
 // ---------- UI: notes ----------
 function renderNotes() {
   const showRead = $('showRead').checked;
@@ -258,7 +275,11 @@ function renderNotes() {
     copy.textContent = 'Copy';
     copy.className = 'small ghost';
     copy.onclick = () => navigator.clipboard.writeText(n.text).then(() => toast('Copied'));
-    if (n.text) meta.append(copy);
+    if (n.photo) {
+      copy.textContent = 'Save photo';
+      copy.onclick = () => savePhoto(n);
+    }
+    if (n.text || n.photo) meta.append(copy);
     if (!isRead) {
       const btn = document.createElement('button');
       btn.textContent = '✓ Mark read';
