@@ -9,12 +9,20 @@ const NETS = {
 };
 const NOTE_PREFIX = 'yn1:';   // encrypted note:  "yn1:" + iv(12) + AES-GCM ciphertext
 const READ_PREFIX = 'ynr1:';  // read marker:     "ynr1:" + txid of the note
+const PHOTO_PREFIX = 'ynp1:'; // photo header:    "ynp1:" + iv(12) + AES-GCM of JSON {p: photo id, n: chunks, b: bytes, c: caption}
+const CHUNK_PREFIX = 'ync1:'; // photo chunk:     "ync1:" + photo id(16 hex) + index(2) + slice of the encrypted JPEG
 const MAX_NOTE = 1024;
+const CHUNK_DATA = MAX_NOTE - CHUNK_PREFIX.length - 16 - 2;
+const PHOTO_SIDE = 800;       // photos are shrunk to 800px, grayscale, JPEG quality 0.4 to keep fees low
+const PHOTO_QUALITY = 0.4;
+const MAX_PHOTO = 1024 * 1024;
+const FEE = 1000;             // microAlgos per transaction
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 const $ = (id) => document.getElementById(id);
-const state = { net: localStorage.getItem('yn_net') || 'testnet', acct: null, key: null, notes: [], read: new Set(), pending: [] };
+const state = { net: localStorage.getItem('yn_net') || 'testnet', acct: null, key: null, notes: [], read: new Set(), pending: [], photo: null };
+const photoUrls = new Map(); // photo id -> Promise<object URL>
 
 // ---------- helpers ----------
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
@@ -51,17 +59,17 @@ async function deriveKey(sk) {
   const hash = await crypto.subtle.digest('SHA-256', concat(enc.encode('ynotes-v1'), sk.slice(0, 32)));
   return crypto.subtle.importKey('raw', hash, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
-async function encryptNote(text) {
+async function encryptBytes(u8) { // iv(12) + ciphertext
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, state.key, enc.encode(text)));
-  return concat(enc.encode(NOTE_PREFIX), iv, ct);
+  return concat(iv, new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, state.key, u8)));
 }
-async function decryptNote(u8) {
-  const body = u8.slice(enc.encode(NOTE_PREFIX).length);
-  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: body.slice(0, 12) }, state.key, body.slice(12));
-  return dec.decode(pt);
-}
-const noteBytesFor = (text) => enc.encode(NOTE_PREFIX).length + 12 + 16 + enc.encode(text).length;
+const decryptBytes = async (u8) => new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u8.slice(0, 12) }, state.key, u8.slice(12)));
+const encryptNote = async (text, prefix = NOTE_PREFIX) => concat(enc.encode(prefix), await encryptBytes(enc.encode(text)));
+const decryptNote = async (u8, prefix = NOTE_PREFIX) => dec.decode(await decryptBytes(u8.slice(prefix.length)));
+const photoHeader = (photo, caption) => JSON.stringify({ p: photo.id, n: photo.chunks.length, b: photo.bytes, c: caption });
+const noteBytesFor = (text) => state.photo
+  ? PHOTO_PREFIX.length + 12 + 16 + enc.encode(photoHeader(state.photo, text)).length
+  : NOTE_PREFIX.length + 12 + 16 + enc.encode(text).length;
 
 // ---------- chain ----------
 async function sendPayment(to, microAmount, noteBytes) {
@@ -73,6 +81,22 @@ async function sendPayment(to, microAmount, noteBytes) {
   const { txid } = await algod().sendRawTransaction(signed).do();
   await algosdk.waitForConfirmation(algod(), txid, 6);
   return txid;
+}
+
+// Sends many 0-ALGO self-payments carrying `notes`, in atomic groups of 16.
+async function sendNotes(notes, onProgress) {
+  const sp = await algod().getTransactionParams().do();
+  const firstIds = [];
+  for (let i = 0; i < notes.length; i += 16) {
+    const txns = notes.slice(i, i + 16).map((note) => algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+      sender: addr(), receiver: addr(), amount: 0, note, suggestedParams: sp,
+    }));
+    if (txns.length > 1) algosdk.assignGroupID(txns);
+    await algod().sendRawTransaction(txns.map((t) => t.signTxn(state.acct.sk))).do();
+    firstIds.push(txns[0].txID());
+    onProgress(Math.min(i + 16, notes.length), notes.length);
+  }
+  for (const id of firstIds) await algosdk.waitForConfirmation(algod(), id, 10);
 }
 
 async function fetchByPrefix(prefix) {
@@ -105,12 +129,18 @@ async function refreshBalance() {
 async function refreshNotes() {
   $('notesStatus').textContent = 'Loading…';
   try {
-    const [noteTxs, readTxs] = await Promise.all([fetchByPrefix(NOTE_PREFIX), fetchByPrefix(READ_PREFIX)]);
+    const [noteTxs, readTxs, photoTxs] = await Promise.all([fetchByPrefix(NOTE_PREFIX), fetchByPrefix(READ_PREFIX), fetchByPrefix(PHOTO_PREFIX)]);
     for (const t of readTxs) state.read.add(dec.decode(unb64(t.note)).slice(READ_PREFIX.length));
     const notes = [];
     for (const t of noteTxs) {
       try {
         notes.push({ id: t.id, time: t['round-time'] * 1000, text: await decryptNote(unb64(t.note)) });
+      } catch { /* not decryptable with this key: ignore */ }
+    }
+    for (const t of photoTxs) {
+      try {
+        const h = JSON.parse(await decryptNote(unb64(t.note), PHOTO_PREFIX));
+        notes.push({ id: t.id, time: t['round-time'] * 1000, text: h.c || '', photo: { id: h.p, n: h.n, bytes: h.b } });
       } catch { /* not decryptable with this key: ignore */ }
     }
     const known = new Set(notes.map((n) => n.id));
@@ -121,6 +151,80 @@ async function refreshNotes() {
     $('notesStatus').textContent = 'Could not load notes: ' + e.message;
   }
   renderNotes();
+}
+
+// ---------- photos ----------
+// Shrink to PHOTO_SIDE px, grayscale, low-quality JPEG.
+async function compressPhoto(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const s = Math.min(1, PHOTO_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.naturalWidth * s));
+    c.height = Math.max(1, Math.round(img.naturalHeight * s));
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; // transparent PNGs would otherwise turn black
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    const d = ctx.getImageData(0, 0, c.width, c.height);
+    const px = d.data;
+    for (let i = 0; i < px.length; i += 4) px[i] = px[i + 1] = px[i + 2] = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+    ctx.putImageData(d, 0, 0);
+    const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', PHOTO_QUALITY));
+    return new Uint8Array(await blob.arrayBuffer());
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function pickPhoto(file) {
+  if (!file) return;
+  try {
+    const jpeg = await compressPhoto(file);
+    if (jpeg.length > MAX_PHOTO) return toast('Photo too large even after shrinking', true);
+    const id = [...crypto.getRandomValues(new Uint8Array(8))].map((b) => b.toString(16).padStart(2, '0')).join('');
+    const blob = await encryptBytes(jpeg);
+    const chunks = [];
+    for (let i = 0, k = 0; i < blob.length; i += CHUNK_DATA, k++) {
+      chunks.push(concat(enc.encode(CHUNK_PREFIX + id), new Uint8Array([k >> 8, k & 255]), blob.slice(i, i + CHUNK_DATA)));
+    }
+    const url = URL.createObjectURL(new Blob([jpeg], { type: 'image/jpeg' }));
+    state.photo = { id, chunks, bytes: jpeg.length, url };
+    $('photoPreview').src = url;
+    $('photoInfo').textContent = `${(jpeg.length / 1024).toFixed(0)} KB · ${chunks.length + 1} txns ≈ ${fmtAlgo((chunks.length + 1) * FEE)} ALGO`;
+    $('photoBox').hidden = false;
+  } catch (e) {
+    toast('Could not read photo: ' + e.message, true);
+  }
+  updateCounter();
+}
+function clearPhoto(keepUrl) {
+  if (state.photo && !keepUrl) URL.revokeObjectURL(state.photo.url);
+  state.photo = null;
+  $('photoFile').value = '';
+  $('photoBox').hidden = true;
+  updateCounter();
+}
+
+function loadPhoto(p) {
+  if (!photoUrls.has(p.id)) {
+    photoUrls.set(p.id, (async () => {
+      const txs = await fetchByPrefix(CHUNK_PREFIX + p.id);
+      const parts = [];
+      for (const t of txs) {
+        const u8 = unb64(t.note);
+        const at = CHUNK_PREFIX.length + 16;
+        parts[(u8[at] << 8) | u8[at + 1]] = u8.slice(at + 2);
+      }
+      if (parts.length !== p.n || parts.includes(undefined)) throw new Error('photo not fully on-chain yet');
+      const jpeg = await decryptBytes(concat(...parts));
+      return URL.createObjectURL(new Blob([jpeg], { type: 'image/jpeg' }));
+    })().catch((e) => { photoUrls.delete(p.id); throw e; }));
+  }
+  return photoUrls.get(p.id);
 }
 
 // ---------- UI: notes ----------
@@ -137,6 +241,14 @@ function renderNotes() {
     const text = document.createElement('div');
     text.className = 'text';
     text.textContent = n.text;
+    if (n.photo) {
+      const img = document.createElement('img');
+      img.className = 'photo';
+      img.alt = `📷 Loading photo (${(n.photo.bytes / 1024).toFixed(0)} KB)…`;
+      img.onclick = () => img.src && window.open(img.src);
+      loadPhoto(n.photo).then((u) => (img.src = u), (e) => (img.alt = '📷 Could not load photo: ' + e.message));
+      li.append(img);
+    }
     const meta = document.createElement('div');
     meta.className = 'meta';
     const time = document.createElement('span');
@@ -146,7 +258,7 @@ function renderNotes() {
     copy.textContent = 'Copy';
     copy.className = 'small ghost';
     copy.onclick = () => navigator.clipboard.writeText(n.text).then(() => toast('Copied'));
-    meta.append(copy);
+    if (n.text) meta.append(copy);
     if (!isRead) {
       const btn = document.createElement('button');
       btn.textContent = '✓ Mark read';
@@ -164,13 +276,26 @@ function renderNotes() {
 
 async function saveNote() {
   const text = $('noteText').value.trim();
-  if (!text) return;
+  const photo = state.photo;
+  if (!text && !photo) return;
   if (noteBytesFor(text) > MAX_NOTE) return toast('Note too long', true);
+  if (photo && !confirm(`Save photo on-chain?\n${photo.chunks.length + 1} transactions ≈ ${fmtAlgo((photo.chunks.length + 1) * FEE)} ALGO in fees.`)) return;
   const btn = $('saveNote');
   busy(btn, true, 'Saving…');
   try {
-    const id = await sendPayment(addr(), 0, await encryptNote(text));
-    state.pending.push({ id, time: Date.now(), text });
+    let id;
+    if (photo) {
+      // Chunks first; the header (which makes the photo show up) only once they are all confirmed.
+      await sendNotes(photo.chunks, (done, total) => (btn.textContent = `Uploading ${done}/${total}…`));
+      btn.textContent = 'Saving…';
+      id = await sendPayment(addr(), 0, await encryptNote(photoHeader(photo, text), PHOTO_PREFIX));
+      photoUrls.set(photo.id, Promise.resolve(photo.url));
+      state.pending.push({ id, time: Date.now(), text, photo: { id: photo.id, n: photo.chunks.length, bytes: photo.bytes } });
+      clearPhoto(true);
+    } else {
+      id = await sendPayment(addr(), 0, await encryptNote(text));
+      state.pending.push({ id, time: Date.now(), text });
+    }
     $('noteText').value = '';
     updateCounter();
     renderNotes();
@@ -395,6 +520,9 @@ async function init() {
   $('saveNote').onclick = saveNote;
   $('noteText').oninput = updateCounter;
   $('noteText').onkeydown = (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) saveNote(); };
+  $('photoBtn').onclick = () => $('photoFile').click();
+  $('photoFile').onchange = () => pickPhoto($('photoFile').files[0]);
+  $('photoClear').onclick = () => clearPhoto();
   $('refreshBtn').onclick = () => { refreshBalance(); refreshNotes(); };
   $('showRead').onchange = renderNotes;
 

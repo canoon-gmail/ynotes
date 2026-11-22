@@ -38,6 +38,8 @@
   #notes li { border-top:1px solid #334155; padding:10px 0; }
   #notes li.read { opacity:.45; }
   #notes .text { white-space:pre-wrap; word-break:break-word; }
+  #notes img.photo { display:block; max-width:100%; border-radius:8px; margin-bottom:6px; cursor:zoom-in; color:var(--mute); font-size:13px; }
+  #photoBox img { max-width:100%; max-height:240px; border-radius:8px; display:block; }
   #notes .meta { display:flex; gap:8px; align-items:center; margin-top:6px; color:var(--mute); font-size:12px; }
   #notes .meta span { flex:1; }
   details summary { cursor:pointer; color:var(--mute); font-weight:600; }
@@ -90,8 +92,14 @@
     <div class="card">
       <h2>New note</h2>
       <textarea id="noteText" placeholder="Write a note to yourself… (Ctrl+Enter to save)"></textarea>
+      <div id="photoBox" hidden style="margin-top:8px">
+        <img id="photoPreview" alt="">
+        <div class="row"><span id="photoInfo" class="mute grow"></span><button id="photoClear" class="small ghost">✕ Remove</button></div>
+      </div>
+      <input id="photoFile" type="file" accept="image/*" hidden>
       <div class="row">
         <span id="counter" class="mute grow">32 / 1024 bytes</span>
+        <button id="photoBtn" class="ghost">📷 Photo</button>
         <button id="saveNote">Save on-chain</button>
       </div>
     </div>
@@ -133,7 +141,7 @@
         <button id="changePinBtn" class="ghost">Change PIN</button>
         <button id="logoutBtn" class="danger">Forget wallet here</button>
       </div>
-      <p class="mute">Your key is stored on this device encrypted with your PIN. Each note or mark-read costs 0.001 ALGO in network fees. Notes are encrypted with your key before they go on-chain. The chain keeps them forever.</p>
+      <p class="mute">Your key is stored on this device encrypted with your PIN. Each note or mark-read costs 0.001 ALGO in network fees. A photo (shrunk to 800px gray) takes about 1 transaction per KB, typically 10–40. Notes are encrypted with your key before they go on-chain. The chain keeps them forever.</p>
     </div>
   </section>
 </div>
